@@ -1,0 +1,336 @@
+# server_data_models.py
+"""
+Server-side Data Models and Parsers for Civilization IV Telemetry Server.
+Parses JSON payloads received from Civ IV client modules (HttpRequestManager,
+CityBuildablesScanner, CustomCiv4EventHandler, MapScanner, TechTreeScanner).
+"""
+
+class CyCityData(object):
+    """Represents a serialized CyCity instance from Civ IV."""
+    def __init__(self, name="", owner=-1, population=0, x=-1, y=-1, city_id=-1):
+        self.name = name
+        self.owner = owner
+        self.population = population
+        self.x = x
+        self.y = y
+        self.city_id = city_id
+
+    @classmethod
+    def from_dict(cls, d):
+        if not isinstance(d, dict):
+            return None
+        return cls(
+            name=d.get("name", ""),
+            owner=d.get("owner", -1),
+            population=d.get("population", 0),
+            x=d.get("x", -1),
+            y=d.get("y", -1),
+            city_id=d.get("id", -1)
+        )
+
+    def __repr__(self):
+        return "<CyCity '%s' (ID: %d, Owner: %d, Pop: %d, Pos: %d,%d)>" % (
+            self.name, self.city_id, self.owner, self.population, self.x, self.y
+        )
+
+
+class CyUnitData(object):
+    """Represents a serialized CyUnit instance from Civ IV."""
+    def __init__(self, name="", owner=-1, unit_type=-1, x=-1, y=-1, unit_id=-1):
+        self.name = name
+        self.owner = owner
+        self.unit_type = unit_type
+        self.x = x
+        self.y = y
+        self.unit_id = unit_id
+
+    @classmethod
+    def from_dict(cls, d):
+        if not isinstance(d, dict):
+            return None
+        return cls(
+            name=d.get("name", ""),
+            owner=d.get("owner", -1),
+            unit_type=d.get("unit_type", -1),
+            x=d.get("x", -1),
+            y=d.get("y", -1),
+            unit_id=d.get("id", -1)
+        )
+
+    def __repr__(self):
+        return "<CyUnit '%s' (ID: %d, Owner: %d, Type: %d, Pos: %d,%d)>" % (
+            self.name, self.unit_id, self.owner, self.unit_type, self.x, self.y
+        )
+
+
+class BuildableItem(object):
+    """Represents a unit or building available for training/construction in a city."""
+    def __init__(self, item_type="", cost=0):
+        self.item_type = item_type  # XML Type key, e.g. 'UNIT_SETTLER' or 'BUILDING_GRANARY'
+        self.cost = cost            # Production hammer cost
+
+    @classmethod
+    def from_dict(cls, d):
+        if not isinstance(d, dict):
+            return None
+        return cls(
+            item_type=d.get("type", ""),
+            cost=d.get("cost", 0)
+        )
+
+    def __repr__(self):
+        return "%s (Cost: %d)" % (self.item_type, self.cost)
+
+
+class CityBuildablesEntry(object):
+    """Represents buildable units and buildings for a specific city."""
+    def __init__(self, city_name="", city_id=-1, available_units=None, available_buildings=None):
+        self.city_name = city_name
+        self.city_id = city_id
+        self.available_units = available_units if available_units is not None else []
+        self.available_buildings = available_buildings if available_buildings is not None else []
+
+    @classmethod
+    def from_dict(cls, d):
+        if not isinstance(d, dict):
+            return None
+        
+        raw_units = d.get("available_units", [])
+        units = []
+        for u in raw_units:
+            item = BuildableItem.from_dict(u)
+            if item:
+                units.append(item)
+
+        raw_buildings = d.get("available_buildings", [])
+        buildings = []
+        for b in raw_buildings:
+            item = BuildableItem.from_dict(b)
+            if item:
+                buildings.append(item)
+
+        return cls(
+            city_name=d.get("name", ""),
+            city_id=d.get("id", -1),
+            available_units=units,
+            available_buildings=buildings
+        )
+
+    def __repr__(self):
+        return "<City '%s' (ID: %d) -> Units: %d, Buildings: %d>" % (
+            self.city_name, self.city_id, len(self.available_units), len(self.available_buildings)
+        )
+
+
+class TurnBuildablesScanPayload(object):
+    """Parses onCityBuildablesScan JSON telemetry posted at turn start."""
+    def __init__(self, turn=0, player_id=0, cities_count=0, cities=None):
+        self.turn = turn
+        self.player_id = player_id
+        self.cities_count = cities_count
+        self.cities = cities if cities is not None else []
+
+    @classmethod
+    def from_dict(cls, d):
+        if not isinstance(d, dict):
+            return None
+        
+        raw_cities = d.get("cities", [])
+        parsed_cities = []
+        for c in raw_cities:
+            entry = CityBuildablesEntry.from_dict(c)
+            if entry:
+                parsed_cities.append(entry)
+
+        return cls(
+            turn=d.get("turn", 0),
+            player_id=d.get("player_id", 0),
+            cities_count=d.get("cities_count", len(parsed_cities)),
+            cities=parsed_cities
+        )
+
+    def summary(self):
+        lines = []
+        lines.append("=== BUILDABLES SCAN REPORT (Turn %d, Player %d) ===" % (self.turn, self.player_id))
+        lines.append("Total Cities Scanned: %d" % len(self.cities))
+        for c in self.cities:
+            lines.append("  City: %s (ID: %d)" % (c.city_name, c.city_id))
+            units_str = ", ".join([repr(u) for u in c.available_units])
+            buildings_str = ", ".join([repr(b) for b in c.available_buildings])
+            lines.append("    Units (%d)    : %s" % (len(c.available_units), units_str if units_str else "None"))
+            lines.append("    Buildings (%d): %s" % (len(c.available_buildings), buildings_str if buildings_str else "None"))
+        lines.append("==================================================")
+        return "\n".join(lines)
+
+
+class TechItem(object):
+    """
+    Represents an individual Technology item in the Civ IV Tech Tree.
+    """
+    def __init__(self, tech_id=-1, tech_type="", name="", cost=0, status="", grid_x=0, grid_y=0, era=-1, beakers_left=0):
+        self.tech_id = tech_id
+        self.tech_type = tech_type        # XML Type Key, e.g. 'TECH_AGRICULTURE'
+        self.name = name                  # Description string, e.g. 'Agriculture'
+        self.cost = cost                  # Research cost
+        self.status = status              # Status string: 'KNOWN', 'AVAILABLE', or 'LOCKED'
+        self.grid_x = grid_x
+        self.grid_y = grid_y
+        self.era = era
+        self.beakers_left = beakers_left  # Remaining research points if AVAILABLE
+
+    @classmethod
+    def from_dict(cls, d):
+        if not isinstance(d, dict):
+            return None
+        return cls(
+            tech_id=d.get("id", -1),
+            tech_type=d.get("type", ""),
+            name=d.get("name", ""),
+            cost=d.get("cost", 0),
+            status=d.get("status", "UNKNOWN"),
+            grid_x=d.get("grid_x", 0),
+            grid_y=d.get("grid_y", 0),
+            era=d.get("era", -1),
+            beakers_left=d.get("beakers_left", 0)
+        )
+
+    def __repr__(self):
+        if self.status == "AVAILABLE" and self.beakers_left > 0:
+            return "%s (Cost: %d, Left: %d)" % (self.tech_type, self.cost, self.beakers_left)
+        return "%s (Cost: %d)" % (self.tech_type, self.cost)
+
+
+class TechTreeScanPayload(object):
+    """
+    Parses onTechTreeScan JSON telemetry posted at game or turn start.
+    Contains three distinct lists representing known_techs, available_techs, and locked_techs.
+    """
+    def __init__(self, player_id=0, civilization="", current_research=-1, 
+                 known_count=0, available_count=0, locked_count=0,
+                 known_techs=None, available_techs=None, locked_techs=None):
+        self.player_id = player_id
+        self.civilization = civilization
+        self.current_research = current_research
+        self.known_count = known_count
+        self.available_count = available_count
+        self.locked_count = locked_count
+        self.known_techs = known_techs if known_techs is not None else []
+        self.available_techs = available_techs if available_techs is not None else []
+        self.locked_techs = locked_techs if locked_techs is not academic and not None else []
+
+    @classmethod
+    def from_dict(cls, d):
+        if not isinstance(d, dict):
+            return None
+
+        raw_known = d.get("known_techs", [])
+        known = []
+        for t in raw_known:
+            item = TechItem.from_dict(t)
+            if item:
+                known.append(item)
+
+        raw_avail = d.get("available_techs", [])
+        avail = []
+        for t in raw_avail:
+            item = TechItem.from_dict(t)
+            if item:
+                avail.append(item)
+
+        raw_locked = d.get("locked_techs", [])
+        locked = []
+        for t in raw_locked:
+            item = TechItem.from_dict(t)
+            if item:
+                locked.append(item)
+
+        return cls(
+            player_id=d.get("player_id", 0),
+            civilization=d.get("civilization", ""),
+            current_research=d.get("current_research", -1),
+            known_count=d.get("known_count", len(known)),
+            available_count=d.get("available_count", len(avail)),
+            locked_count=d.get("locked_count", len(locked)),
+            known_techs=known,
+            available_techs=avail,
+            locked_techs=locked
+        )
+
+    def summary(self):
+        lines = []
+        lines.append("=== TECH TREE SCAN REPORT (Player %d - %s) ===" % (self.player_id, self.civilization))
+        lines.append("Current Research ID : %s" % str(self.current_research))
+        lines.append("Known Techs (%d)    : %s" % (
+            len(self.known_techs),
+            ", ".join([t.tech_type for t in self.known_techs]) if self.known_techs else "None"
+        ))
+        lines.append("Available Techs (%d): %s" % (
+            len(self.available_techs),
+            ", ".join([repr(t) for t in self.available_techs]) if self.available_techs else "None"
+        ))
+        lines.append("Locked Techs (%d)   : %d technologies remaining in Tech Tree" % (
+            len(self.locked_techs), len(self.locked_techs)
+        ))
+        lines.append("==================================================")
+        return "\n".join(lines)
+
+
+class GenericEventPayload(object):
+    """Parses standard game event payloads posted by CustomCiv4EventHandler."""
+    def __init__(self, event_name="", args=None, extra_data=None):
+        self.event_name = event_name
+        self.args = args if args is not None else []
+        self.extra_data = extra_data if extra_data is not None else {}
+
+    @classmethod
+    def from_dict(cls, d):
+        if not isinstance(d, dict):
+            return None
+        
+        event_name = d.get("event", "UNKNOWN_EVENT")
+        raw_args = d.get("args", [])
+        
+        parsed_args = []
+        for arg in raw_args:
+            if isinstance(arg, dict) and "_type" in arg:
+                obj_type = arg.get("_type")
+                if obj_type == "CyCity":
+                    parsed_args.append(CyCityData.from_dict(arg))
+                elif obj_type == "CyUnit":
+                    parsed_args.append(CyUnitData.from_dict(arg))
+                else:
+                    parsed_args.append(arg)
+            else:
+                parsed_args.append(arg)
+
+        extra = {}
+        for k, v in d.items():
+            if k not in ("event", "args"):
+                extra[k] = v
+
+        return cls(
+            event_name=event_name,
+            args=parsed_args,
+            extra_data=extra
+        )
+
+    def summary(self):
+        args_repr = ", ".join([repr(a) for a in self.args])
+        extra_repr = (" | Extra: " + str(self.extra_data)) if self.extra_data else ""
+        return "[EVENT] %s -> Args: [%s]%s" % (self.event_name, args_repr, extra_repr)
+
+
+class PayloadDispatcher(object):
+    """Central parser/dispatcher that routes incoming JSON payloads to specific data model classes."""
+    @staticmethod
+    def parse_payload(json_dict):
+        if not isinstance(json_dict, dict):
+            return None
+        
+        event_type = json_dict.get("event", "")
+        if event_type == "onCityBuildablesScan":
+            return TurnBuildablesScanPayload.from_dict(json_dict)
+        elif event_type == "onTechTreeScan":
+            return TechTreeScanPayload.from_dict(json_dict)
+        else:
+            return GenericEventPayload.from_dict(json_dict)
