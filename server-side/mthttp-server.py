@@ -2,6 +2,9 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 import json
 import server_data_models_v3 as server_data_models
+from civ4_json_db import Civ4JsonTelemetryDatabase
+
+db = Civ4JsonTelemetryDatabase()
 
 # Define a multi-threaded server class by inheriting ThreadingMixIn
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
@@ -19,51 +22,36 @@ class ApiHandler:
     @staticmethod
     def handle_post(handler_instance):
         try:
-            # Step 1: Read Content-Length header
             content_length = int(handler_instance.headers.get("Content-Length", 0))
             if content_length == 0:
                 handler_instance.send_response(400)
-                handler_instance.send_header("Content-type", "application/json")
                 handler_instance.end_headers()
-                handler_instance.wfile.write(
-                    b'{"error": "Missing Content-Length or empty body"}'
-                )
+                handler_instance.wfile.write(b'{"error": "Empty body"}')
                 return
 
-            # Step 2: Read raw bytes and decode to UTF-8
-            raw_data = handler_instance.rfile.read(content_length)
-            body_str = raw_data.decode("utf-8")
-
-            # Step 3: Parse JSON string into dictionary
+            # Read raw JSON bytes directly from the request
+            raw_bytes = handler_instance.rfile.read(content_length)
+            body_str = raw_bytes.decode("utf-8")
+            
+            # Optional: quick check to parse JSON structure
             json_data = json.loads(body_str)
-            parsed_model = server_data_models.PayloadDispatcher.parse_payload(json_data)
+            payload_type = json_data.get("type", "generic_telemetry")
 
-            if parsed_model:
-                if hasattr(parsed_model, 'summary'):
-                    print(parsed_model.summary())
-                else:
-                    print("Parsed Model:", repr(parsed_model))
-            else:
-                print("Received Unparsed JSON:", json_data)
-
-
-            # Step 4: Send JSON response
-            response_payload = {
-                "status": "success",
-                "message": "Hello, data! Data received successfully.",
-            }
-            response_bytes = json.dumps(response_payload).encode("utf-8")
+            # Store the raw JSON string straight into SQLite
+            record_id = db.save_payload(payload_type, body_str)
 
             handler_instance.send_response(200)
             handler_instance.send_header("Content-type", "application/json")
             handler_instance.end_headers()
-            handler_instance.wfile.write(response_bytes)
+            handler_instance.wfile.write(
+                json.dumps({"status": "success", "record_id": record_id}).encode("utf-8")
+            )
 
         except json.JSONDecodeError:
             handler_instance.send_response(400)
-            handler_instance.send_header("Content-type", "application/json")
             handler_instance.end_headers()
-            handler_instance.wfile.write(b'{"error": "Invalid JSON format"}')
+            handler_instance.wfile.write(b'{"error": "Invalid JSON"}')
+
 
 # --- Handler 2: Handles Website / HTML requests ---
 class WebHandler:
