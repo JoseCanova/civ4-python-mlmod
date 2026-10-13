@@ -1,0 +1,68 @@
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
+import time
+
+
+# --- Multi-threading MixIn Class ---
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+  """This mix-in enables handling each request in a separate thread."""
+
+  daemon_threads = True  # Allows threads to close cleanly when the main program exits
+
+
+# --- Handler classes (same as before) ---
+class ApiHandler:
+
+  @staticmethod
+  def handle_get(handler_instance):
+    # Simulate a slow task (e.g., database query or sleep) to prove concurrency
+    time.sleep(3)
+    handler_instance.send_response(200)
+    handler_instance.send_header("Content-type", "application/json")
+    handler_instance.end_headers()
+    handler_instance.wfile.write(b'{"route": "api", "status": "active"}')
+
+
+class WebHandler:
+
+  @staticmethod
+  def handle_get(handler_instance):
+    handler_instance.send_response(200)
+    handler_instance.send_header("Content-type", "text/html; charset=utf-8")
+    handler_instance.end_headers()
+    handler_instance.wfile.write(b"<h1>Welcome to the Home Page!</h1>")
+
+
+# --- Master Dispatcher Handler ---
+class RouterMasterHandler(BaseHTTPRequestHandler):
+
+  def do_GET(self):
+    print(f"[{self.client_address[0]}] Request started for: {self.path}")
+
+    if self.path.startswith("/api"):
+      ApiHandler.handle_get(self)
+    elif self.path == "/" or self.path.startswith("/web"):
+      WebHandler.handle_get(self)
+    else:
+      self.send_response(404)
+      self.end_headers()
+      self.wfile.write(b"Custom 404: Route Not Found")
+
+    print(f"[{self.client_address[0]}] Request finished for: {self.path}")
+
+
+def run(port=8000):
+  server_address = ("", port)
+  # Use ThreadingHTTPServer instead of standard HTTPServer
+  http_server = ThreadingHTTPServer(server_address, RouterMasterHandler)
+  print(f"Multi-threaded, multi-handler server running on port {port}...")
+
+  try:
+    http_server.serve_forever()
+  except KeyboardInterrupt:
+    print("\nShutting down server.")
+    http_server.server_close()
+
+
+if __name__ == "__main__":
+  run()
