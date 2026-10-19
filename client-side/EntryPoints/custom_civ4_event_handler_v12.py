@@ -20,6 +20,20 @@ try:
 except ImportError:
     HAS_CITY_MODULES = False
 
+try:
+    import turn_db_facade
+    HAS_DB_FACADE = True
+except ImportError: 
+    HAS_DB_FACADE = False
+    
+try:
+    import simplejson as json
+    HAS_JSON = True
+except ImportError:
+    print "import error on simplejson"
+    json = None
+    HAS_JSON = False
+
 gc = CyGlobalContext()
 
 
@@ -89,6 +103,11 @@ class CustomCiv4EventHandler(CvEventManager):
             auto_manage_cities=self.auto_manage_cities
         )
 
+        if HAS_DB_FACADE and HAS_JSON:
+            self.db_facade = turn_db_facade.TurnDatabaseFacade("turn_database.db")
+        else:
+            self.db_facade = None 
+
         print "CustomCiv4EventHandler: Framework initialized successfully."
 
     @property
@@ -133,6 +152,21 @@ class CustomCiv4EventHandler(CvEventManager):
                     msg = "Error executing listener '%s' for event '%s': %s" % (str(handler), event_name, str(e))
                     print msg
 
+
+    def _save_db(self,payload)
+        if self.pGame and not self.pGame.isNone():
+            iGameTurn = pGame.getGameTurn()
+
+        pPlayer = gc.getActivePlayer()
+        if pPlayer and not pPlayer.isNone() and pPlayer.isHuman():
+            print "=== [EVENT] Game Start (Turn 1): Running Tech Tree Scan ==="
+            try:
+               if self.db_facade and not self.db_facade.isNone():
+                    self.db_facade.insert(iGameTurn , payload)       
+            except Exception, e:
+                msg = "Warning: Failed running initial Tech Tree scan: %s" % str(e)
+                print msg
+
     # ---------------------------------------------------------------------------
     # Event Overloads & Automated Handlers
     # ---------------------------------------------------------------------------
@@ -140,15 +174,15 @@ class CustomCiv4EventHandler(CvEventManager):
     def onGameStart(self, argsList):
         """Fired when a new game starts (Turn 1). Scans the Tech Tree and initial cities."""
         CvEventManager.onGameStart(self, argsList)
-
-        pPlayer = gc.getActivePlayer()
-        if pPlayer and not pPlayer.isNone() and pPlayer.isHuman():
-            print "=== [EVENT] Game Start (Turn 1): Running Tech Tree Scan ==="
-            try:
-                self.tech_scanner.run_tech_scan(pPlayer)
-            except Exception, e:
-                msg = "Warning: Failed running initial Tech Tree scan: %s" % str(e)
-                print msg
+        self.pGame = gc.getGame()
+        try:
+            pPlayer = gc.getActivePlayer()
+            if pPlayer and not pPlayer.isNone() and pPlayer.isHuman():
+                payload = self.tech_scanner.scanPlayerTechTree(pPlayer)
+                self._save_db(payload) 
+        except Exception, e:
+            msg = "Warning: Failed running initial Tech Tree scan: %s" % str(e)
+            print msg
 
         self._dispatch_listeners('onGameStart', argsList)
 
@@ -163,11 +197,13 @@ class CustomCiv4EventHandler(CvEventManager):
                 print msg
                 try:
                     # Run turn buildables scan
-                    self.buildables_scanner.run_turn_scan(pPlayer)
-
+                    #self.buildables_scanner.run_turn_scan(pPlayer)
+                    build_payload = self.buildables_scanner.scanActivePlayerCities(pPlayer, true)
+                    _save_db(build_payload)
                     # Also refresh tech tree options at game start or turn start
                     if iGameTurn == 1 or iGameTurn % 5 == 0:
-                        self.tech_scanner.run_tech_scan(pPlayer)
+                        tech_payload = self.tech_scanner.scanPlayerTechTree(pPlayer)
+                        self._save_db(tech_payload)
                 except Exception, e:
                     msg = "Warning: Failed running turn scan on turn %d: %s" % str(e)
                     print msg
@@ -186,7 +222,21 @@ class CustomCiv4EventHandler(CvEventManager):
         CvEventManager.onCityDoTurn(self, argsList)
 
         if pCity and not pCity.isNone():
-            self.city_do_turn_delegate.handle_city_do_turn(pCity, iPlayer, argsList)
+            self.city_do_turn_delegate.calculate_city_turn_telemetry(pCity)
+            # Step 1: Optimize citizen assignment
+            self.city_do_turn_delegate.optimize_city_citizens(pCity)
+
+            # Step 2: Build telemetry payload
+            telemetry_data = self.city_do_turn_delegate.calculate_city_turn_telemetry(pCity)
+            szProject = "None"
+            if telemetry_data:
+                if "city_turn_status" in telemetry_data:
+                    szProject = telemetry_data["city_turn_status"].get("current_project", "None")
+                self._save_db(telemetry_data)
+
+            msg = "=== [EVENT] City Do Turn: %s | Current Project: %s ===" % (szName, szProject)
+            print msg
+
 
         self._dispatch_listeners('onCityDoTurn', argsList)
 
@@ -196,10 +246,16 @@ class CustomCiv4EventHandler(CvEventManager):
         Delegates strategy evaluation and behavior management to CityBuiltDelegate helper class.
         """
         pCity = argsList[0]
+        pPlayer = gc.getActivePlayer()
         CvEventManager.onCityBuilt(self, argsList)
-
-        if pCity and not pCity.isNone():
-            self.city_built_delegate.handle_city_built(pCity, argsList)
+        if pPlayer and not pPlayer.isNone() and pPlayer.isHuman():
+            if pCity and not pCity.isNone():
+                strategy_data = self.city_built_delegate.determine_city_strategy(pCity, pPlayer)
+                szStrategy = "DEFAULT"
+                if strategy_data:
+                    if "strategy" in strategy_data:
+                        szStrategy = strategy_data["strategy"].get("type", "DEFAULT")
+                    self._save_db(strategy_data)
 
         self._dispatch_listeners('onCityBuilt', argsList)
 

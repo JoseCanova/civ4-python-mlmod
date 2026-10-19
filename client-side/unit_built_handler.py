@@ -8,14 +8,14 @@ gc = CyGlobalContext()
 
 class UnitBuiltDelegate(object):
     """
-    Delegate helper class that manages unit role assignment, post-training behavior,
-    and telemetry reporting when a unit is trained (onUnitBuilt event).
-    Separates event handling from unit classification and tactical role assignment.
+    Delegate helper class that manages unit role assignment and telemetry construction
+    when a unit is trained (onUnitBuilt event).
+    Decoupled from networking; returns structured payload dicts for local database buffering.
     Strict Python 2.4 compatibility - NO ternary operators used under any circumstance.
     """
 
-    def __init__(self, http_mgr=None):
-        self.http_mgr = http_mgr
+    def __init__(self):
+        pass
 
     def classify_unit_role(self, pUnit):
         """
@@ -101,6 +101,7 @@ class UnitBuiltDelegate(object):
             szCityName = pCity.getName()
 
         unit_payload = {
+            "event": "onUnitBuilt",
             "unit_details": {
                 "unit_id": iUnitID,
                 "unit_name": szUnitName,
@@ -115,13 +116,13 @@ class UnitBuiltDelegate(object):
 
         return unit_payload
 
-    def handle_unit_built(self, pCity, pUnit, argsList):
+    def handle_unit_built(self, pCity, pUnit, argsList=None):
         """
-        Executes the behavior when onUnitBuilt is delegated from CustomCiv4EventHandler.
-        Classifies unit role and posts JSON telemetry to the HTTP server.
+        Executes behavior when onUnitBuilt is delegated from CustomCiv4EventHandler.
+        Classifies unit role and returns the structured telemetry dictionary.
         """
         if not pUnit:
-            return False
+            return None
 
         szUnitName = pUnit.getName()
         szCityName = "Unknown City"
@@ -138,7 +139,4 @@ class UnitBuiltDelegate(object):
         msg = "=== [EVENT] Unit Trained: %s in %s | Strategic Role: %s ===" % (szUnitName, szCityName, szRole)
         print msg
 
-        if self.http_mgr:
-            return self.http_mgr.post_event("onUnitBuilt", argsList, extra_data=telemetry_data)
-
-        return False
+        return telemetry_data

@@ -9,6 +9,9 @@ from CvEventManager import CvEventManager
 import http_request_manager
 import city_buildables_scanner
 import tech_tree_scanner
+import city_built_handler
+import unit_built_handler
+import city_do_turn_handler
 
 try:
     import city
@@ -17,17 +20,38 @@ try:
 except ImportError:
     HAS_CITY_MODULES = False
 
+try:
+    import turn_db_facade
+    HAS_DB_FACADE = True
+except ImportError: 
+    HAS_DB_FACADE = False
+    
+try:
+    import simplejson as json
+    HAS_JSON = True
+except ImportError:
+    try:
+        import json
+        HAS_JSON = True
+    except ImportError:
+        json = None
+        HAS_JSON = False
+
 gc = CyGlobalContext()
 
 
 class CustomCiv4EventHandler(CvEventManager):
     """
     Modular Event Handler Framework for Civilization IV (Python 2.4).
-    Delegates network communication to HttpRequestManager to centralize HTTP GET/POST requests,
-    allows dynamic registration of event listeners, posts JSON-serialized payloads to /api,
-    and provides automated gameplay handlers for cities, combat, construction, and player turns.
-    Includes automated Turn 1 / Turn Start TechTreeScanner and CityBuildablesScanner.
-    Strict Python 2.4 compatibility - NO ternary operators used in client-side code.
+    Buffers all gameplay event payloads locally into Berkeley DB (turn_db_facade),
+    submits a single consolidated turn batch to the HTTP server on onEndPlayerTurn,
+    and purges processed events from local DB upon successful submission to prevent memory growth in 32-bit mode.
+    Delegates event behaviors to specialized delegate classes:
+      - CityBuiltDelegate (onCityBuilt strategy evaluation)
+      - UnitBuiltDelegate (onUnitBuilt strategic role assignment)
+      - CityDoTurnDelegate (onCityDoTurn citizen optimization & turn metrics)
+      - CityBuildablesScanner & TechTreeScanner (turn state scanning)
+    Strict Python 2.4 compatibility - NO ternary operators used in client-side code under any circumstance.
     """
 
     def __init__(self):
@@ -59,17 +83,27 @@ class CustomCiv4EventHandler(CvEventManager):
             timeout=2.0
         )
 
-        # Initialize city buildables scanner
-        self.buildables_scanner = city_buildables_scanner.CityBuildablesScanner(
-            http_mgr=self.http_mgr
+        # Initialize city buildables scanner (decoupled from direct HTTP posting)
+        self.buildables_scanner = city_buildables_scanner.CityBuildablesScanner()
+
+        # Initialize tech tree scanner (decoupled from direct HTTP posting)
+        self.tech_scanner = tech_tree_scanner.TechTreeScanner()
+
+        # Initialize helper delegate classes (decoupled from direct HTTP posting)
+        self.city_built_delegate = city_built_handler.CityBuiltDelegate()
+
+        self.unit_built_delegate = unit_built_handler.UnitBuiltDelegate()
+
+        self.city_do_turn_delegate = city_do_turn_handler.CityDoTurnDelegate(
+            auto_manage_cities=self.auto_manage_cities
         )
 
-        # Initialize tech tree scanner
-        self.tech_scanner = tech_tree_scanner.TechTreeScanner(
-            http_mgr=self.http_mgr
-        )
+        if HAS_DB_FACADE and HAS_JSON:
+            self.db_facade = turn_db_facade.TurnDatabaseFacade("turn_database.db")
+        else:
+            self.db_facade = None 
 
-        print "CustomCiv4EventHandler: Framework initialized successfully."
+        print("CustomCiv4EventHandler: Framework initialized successfully.")
 
     @property
     def server_online(self):
@@ -87,11 +121,6 @@ class CustomCiv4EventHandler(CvEventManager):
             return self.http_mgr.check_server()
         return False
 
-    def post_event_to_api(self, event_name, argsList):
-        if self.http_mgr:
-            return self.http_mgr.post_event(event_name, argsList)
-        return False
-
     def register_listener(self, event_name, handler_func):
         if event_name not in self._event_listeners:
             self._event_listeners[event_name] = []
@@ -101,17 +130,44 @@ class CustomCiv4EventHandler(CvEventManager):
         if hasattr(handler_func, '__name__'):
             szFuncName = handler_func.__name__
 
-        print "Registered listener '%s' for event '%s'" % (szFuncName, event_name)
+        msg = "Registered listener '%s' for event '%s'" % (szFuncName, event_name)
+        print(msg)
 
     def _dispatch_listeners(self, event_name, argsList):
         if event_name in self._event_listeners:
             for handler in self._event_listeners[event_name]:
                 try:
                     handler(argsList)
-                except Exception, e:
-                    print "Error executing listener '%s' for event '%s': %s" % (
-                        str(handler), event_name, str(e)
-                    )
+                except Exception:
+                    e = sys.exc_info()[1]
+                    msg = "Error executing listener '%s' for event '%s': %s" % (str(handler), event_name, str(e))
+                    print(msg)
+
+    def _save_db(self, payload):
+        """
+        Buffers event payload into Berkeley DB via TurnDatabaseFacade for the current game turn.
+        Stamps turn number onto payload if missing.
+        """
+        if not payload or not isinstance(payload, dict):
+            return False
+
+        iGameTurn = 0
+        pGame = gc.getGame()
+        if pGame and not pGame.isNone():
+            iGameTurn = pGame.getGameTurn()
+
+        if "turn" not in payload:
+            payload["turn"] = iGameTurn
+
+        if self.db_facade and hasattr(self.db_facade, 'insert'):
+            try:
+                self.db_facade.insert(iGameTurn, payload)
+                return True
+            except Exception:
+                e = sys.exc_info()[1]
+                msg = "Warning: Failed saving payload to DB for turn %d: %s" % (iGameTurn, str(e))
+                print(msg)
+        return False
 
     # ---------------------------------------------------------------------------
     # Event Overloads & Automated Handlers
@@ -121,13 +177,16 @@ class CustomCiv4EventHandler(CvEventManager):
         """Fired when a new game starts (Turn 1). Scans the Tech Tree and initial cities."""
         CvEventManager.onGameStart(self, argsList)
 
-        pPlayer = gc.getActivePlayer()
-        if pPlayer and not pPlayer.isNone() and pPlayer.isHuman():
-            print "=== [EVENT] Game Start (Turn 1): Running Tech Tree Scan ==="
-            try:
-                self.tech_scanner.run_tech_scan(pPlayer)
-            except Exception, e:
-                print "Warning: Failed running initial Tech Tree scan: %s" % str(e)
+        try:
+            pPlayer = gc.getActivePlayer()
+            if pPlayer and not pPlayer.isNone() and pPlayer.isHuman():
+                payload = self.tech_scanner.scanPlayerTechTree(pPlayer)
+                if payload:
+                    self._save_db(payload)
+        except Exception:
+            e = sys.exc_info()[1]
+            msg = "Warning: Failed running initial Tech Tree scan: %s" % str(e)
+            print(msg)
 
         self._dispatch_listeners('onGameStart', argsList)
 
@@ -138,65 +197,81 @@ class CustomCiv4EventHandler(CvEventManager):
         pPlayer = gc.getPlayer(iPlayer)
         if pPlayer and not pPlayer.isNone():
             if pPlayer.isHuman():
-                print "=== [EVENT] Turn %d started for Human Player (%s) ===" % (
-                    iGameTurn, pPlayer.getCivilizationShortDescription(0)
-                )
+                msg = "=== [EVENT] Turn %d started for Human Player (%s) ===" % (iGameTurn, pPlayer.getCivilizationShortDescription(0))
+                print(msg)
                 try:
                     # Run turn buildables scan
-                    self.buildables_scanner.run_turn_scan(pPlayer)
+                    build_payload = self.buildables_scanner.scanActivePlayerCities(pPlayer, True)
+                    if build_payload:
+                        self._save_db(build_payload)
 
                     # Also refresh tech tree options at game start or turn start
                     if iGameTurn == 1 or iGameTurn % 5 == 0:
-                        self.tech_scanner.run_tech_scan(pPlayer)
-                except Exception, e:
-                    print "Warning: Failed running turn scan on turn %d: %s" % (iGameTurn, str(e))
+                        tech_payload = self.tech_scanner.scanPlayerTechTree(pPlayer)
+                        if tech_payload:
+                            self._save_db(tech_payload)
+                except Exception:
+                    e = sys.exc_info()[1]
+                    msg = "Warning: Failed running turn scan on turn %d: %s" % (iGameTurn, str(e))
+                    print(msg)
             else:
-                print "=== [EVENT] Turn %d started for AI Player %d ===" % (iGameTurn, iPlayer)
+                msg = "=== [EVENT] Turn %d started for AI Player %d ===" % (iGameTurn, iPlayer)
+                print(msg)
 
         self._dispatch_listeners('onBeginPlayerTurn', argsList)
 
     def onCityDoTurn(self, argsList):
+        """
+        Fired when a city completes turn processing.
+        Delegates citizen optimization and turn metric telemetry to CityDoTurnDelegate helper.
+        """
         pCity, iPlayer = argsList
         CvEventManager.onCityDoTurn(self, argsList)
 
         if pCity and not pCity.isNone():
-            if self.auto_manage_cities and HAS_CITY_MODULES:
-                try:
-                    mgr = city.CityCitizenManager(
-                        pCity,
-                        priority_yields=self.city_plot_priority,
-                        specialist_priority=self.city_specialist_priority,
-                        min_food_buffer=self.min_food_buffer
-                    )
-                    mgr.optimize()
-                except Exception, e:
-                    print "Warning: Failed optimizing citizens for %s: %s" % (pCity.getName(), str(e))
-
-            self.post_event_to_api("onCityDoTurn", argsList)
+            telemetry_data = self.city_do_turn_delegate.handle_city_do_turn(pCity, iPlayer, argsList)
+            if telemetry_data:
+                self._save_db(telemetry_data)
 
         self._dispatch_listeners('onCityDoTurn', argsList)
 
     def onCityBuilt(self, argsList):
+        """
+        Fired when a new city is founded.
+        Delegates strategy evaluation and behavior management to CityBuiltDelegate helper class.
+        """
         pCity = argsList[0]
         CvEventManager.onCityBuilt(self, argsList)
 
         if pCity and not pCity.isNone():
-            print "=== [EVENT] City Built: %s ===" % pCity.getName()
-            self.post_event_to_api("onCityBuilt", argsList)
+            pPlayer = gc.getActivePlayer()
+            if pPlayer and not pPlayer.isNone() and pPlayer.isHuman():
+                strategy_data = self.city_built_delegate.handle_city_built(pCity, argsList)
+                if strategy_data:
+                    self._save_db(strategy_data)
 
         self._dispatch_listeners('onCityBuilt', argsList)
 
     def onUnitBuilt(self, argsList):
+        """
+        Fired when a unit completes training in a city.
+        Delegates role classification and telemetry reporting to UnitBuiltDelegate helper class.
+        """
         pCity, pUnit = argsList
         CvEventManager.onUnitBuilt(self, argsList)
 
         if pCity and pUnit:
-            print "=== [EVENT] Unit Trained: %s in %s ===" % (pUnit.getName(), pCity.getName())
-            self.post_event_to_api("onUnitBuilt", argsList)
+            unit_payload = self.unit_built_delegate.handle_unit_built(pCity, pUnit, argsList)
+            if unit_payload:
+                self._save_db(unit_payload)
 
         self._dispatch_listeners('onUnitBuilt', argsList)
 
     def onBuildingBuilt(self, argsList):
+        """
+        Fired when a building is constructed in a city.
+        Constructs telemetry payload and buffers into local Berkeley DB.
+        """
         pCity, iBuildingType = argsList
         CvEventManager.onBuildingBuilt(self, argsList)
 
@@ -206,12 +281,28 @@ class CustomCiv4EventHandler(CvEventManager):
             if buildingInfo:
                 szBuildingName = buildingInfo.getType()
 
-            print "=== [EVENT] Building Constructed: %s in %s ===" % (szBuildingName, pCity.getName())
-            self.post_event_to_api("onBuildingBuilt", argsList)
+            szCityName = "Unknown City"
+            if hasattr(pCity, 'getName'):
+                szCityName = pCity.getName()
+
+            msg = "=== [EVENT] Building Constructed: %s in %s ===" % (szBuildingName, szCityName)
+            print(msg)
+
+            building_payload = {
+                "event": "onBuildingBuilt",
+                "city_name": szCityName,
+                "building_type_id": iBuildingType,
+                "building_name": szBuildingName
+            }
+            self._save_db(building_payload)
 
         self._dispatch_listeners('onBuildingBuilt', argsList)
 
     def onTechAcquired(self, argsList):
+        """
+        Fired when a technology is acquired.
+        Constructs telemetry payload and buffers into local Berkeley DB.
+        """
         eTech, eTeam, ePlayer, bAnnounce = argsList
         CvEventManager.onTechAcquired(self, argsList)
 
@@ -221,16 +312,63 @@ class CustomCiv4EventHandler(CvEventManager):
         if techInfo:
             szTechName = techInfo.getType()
 
-        print "=== [EVENT] Tech Researched: %s by Player %d ===" % (szTechName, ePlayer)
+        msg = "=== [EVENT] Tech Researched: %s by Player %d ===" % (szTechName, ePlayer)
+        print(msg)
 
-        # Post event notification
-        self.post_event_to_api("onTechAcquired", argsList)
+        tech_payload = {
+            "event": "onTechAcquired",
+            "player_id": ePlayer,
+            "tech_id": eTech,
+            "tech_name": szTechName
+        }
+        self._save_db(tech_payload)
 
         # Trigger updated tech tree scan if human player acquired tech
         if pPlayer and not pPlayer.isNone() and pPlayer.isHuman():
             try:
-                self.tech_scanner.run_tech_scan(pPlayer)
-            except Exception, e:
-                print "Warning: Failed running updated Tech Tree scan: %s" % str(e)
+                tech_scan_payload = self.tech_scanner.scanPlayerTechTree(pPlayer)
+                if tech_scan_payload:
+                    self._save_db(tech_scan_payload)
+            except Exception:
+                e = sys.exc_info()[1]
+                msg = "Warning: Failed running updated Tech Tree scan: %s" % str(e)
+                print(msg)
 
         self._dispatch_listeners('onTechAcquired', argsList)
+
+    def onEndPlayerTurn(self, argsList):
+        """
+        Fired when a player completes their turn.
+        Retrieves all event payloads buffered in local Berkeley DB for this turn,
+        transmits a single consolidated batch payload to the HTTP server,
+        and deletes the processed events upon HTTP POST success to prevent memory bloat in 32-bit Civ IV mode.
+        """
+        iGameTurn, iPlayer = argsList
+        CvEventManager.onEndPlayerTurn(self, argsList)
+
+        pPlayer = gc.getPlayer(iPlayer)
+        if pPlayer and not pPlayer.isNone() and pPlayer.isHuman():
+            if self.db_facade and hasattr(self.db_facade, 'get_turn_records'):
+                turn_records = self.db_facade.get_turn_records(iGameTurn)
+                if turn_records and len(turn_records) > 0:
+                    batch_payload = {
+                        "event": "onTurnBatch",
+                        "turn": iGameTurn,
+                        "player_id": iPlayer,
+                        "event_count": len(turn_records),
+                        "events": turn_records
+                    }
+                    msg = "=== [TURN %d END] Submitting batch of %d events to HTTP server ===" % (
+                        iGameTurn, len(turn_records)
+                    )
+                    print(msg)
+
+                    if self.http_mgr:
+                        bSubmitted = self.http_mgr.send_post(batch_payload)
+                        if bSubmitted:
+                            msg_ok = "=== [TURN %d END] HTTP Batch POST successful. Purging local DB turn records ===" % iGameTurn
+                            print(msg_ok)
+                            if hasattr(self.db_facade, 'delete_turn_records'):
+                                self.db_facade.delete_turn_records(iGameTurn)
+
+        self._dispatch_listeners('onEndPlayerTurn', argsList)

@@ -16,12 +16,11 @@ class CityDoTurnDelegate(object):
     """
     Delegate helper class that manages city citizen optimization and turn telemetry
     when a city processes its turn (onCityDoTurn event).
-    Separates event dispatching from citizen optimization and yield calculation.
+    Decoupled from networking; returns structured payload dicts for local database buffering.
     Strict Python 2.4 compatibility - NO ternary operators used under any circumstance.
     """
 
-    def __init__(self, http_mgr=None, auto_manage_cities=True):
-        self.http_mgr = http_mgr
+    def __init__(self, auto_manage_cities=True):
         self.auto_manage_cities = auto_manage_cities
         self.city_plot_priority = ("PRODUCTION", "COMMERCE", "FOOD")
         self.city_specialist_priority = [
@@ -109,6 +108,7 @@ class CityDoTurnDelegate(object):
                 iHammersNeeded = 0
 
         telemetry_payload = {
+            "event": "onCityDoTurn",
             "city_turn_status": {
                 "city_name": szName,
                 "population": iPop,
@@ -124,13 +124,13 @@ class CityDoTurnDelegate(object):
 
         return telemetry_payload
 
-    def handle_city_do_turn(self, pCity, iPlayer, argsList):
+    def handle_city_do_turn(self, pCity, iPlayer=0, argsList=None):
         """
         Executes behavior when onCityDoTurn is delegated from CustomCiv4EventHandler.
-        Optimizes citizens and posts turn telemetry to HTTP server.
+        Optimizes citizens and returns the turn telemetry payload.
         """
         if not pCity or pCity.isNone():
-            return False
+            return None
 
         szName = pCity.getName()
 
@@ -148,8 +148,4 @@ class CityDoTurnDelegate(object):
         msg = "=== [EVENT] City Do Turn: %s | Current Project: %s ===" % (szName, szProject)
         print msg
 
-        # Step 3: Post event payload to HTTP server
-        if self.http_mgr:
-            return self.http_mgr.post_event("onCityDoTurn", argsList, extra_data=telemetry_data)
-
-        return False
+        return telemetry_data

@@ -11,11 +11,12 @@ class CityBuiltDelegate(object):
     Delegate helper class that manages the strategic behavior and telemetry payload
     when a new city is founded (onCityBuilt event).
     Separates event dispatching from gameplay logic and strategy determination.
+    Decoupled from networking; returns structured payload dicts for local database buffering.
     Strict Python 2.4 compatibility - NO ternary operators used under any circumstance.
     """
 
-    def __init__(self, http_mgr=None):
-        self.http_mgr = http_mgr
+    def __init__(self):
+        pass
 
     def determine_city_strategy(self, pCity, pPlayer):
         """
@@ -65,6 +66,8 @@ class CityBuiltDelegate(object):
             firstBuild = "BUILDING_BARRACKS"
 
         strategy_payload = {
+            "event": "onCityBuilt",
+            "city_name": cityName,
             "strategy": {
                 "type": szStrategy,
                 "yield_priority": yieldPriority,
@@ -77,13 +80,13 @@ class CityBuiltDelegate(object):
 
         return strategy_payload
 
-    def handle_city_built(self, pCity, argsList):
+    def handle_city_built(self, pCity, argsList=None):
         """
-        Executes the behavior when onCityBuilt is delegated from CustomCiv4EventHandler.
-        Calculates city strategy and posts JSON telemetry to HTTP server.
+        Executes behavior when onCityBuilt is delegated from CustomCiv4EventHandler.
+        Calculates city strategy and returns the structured payload dictionary.
         """
         if not pCity or pCity.isNone():
-            return False
+            return None
 
         cityName = pCity.getName()
         iOwner = pCity.getOwner()
@@ -100,10 +103,7 @@ class CityBuiltDelegate(object):
             if "strategy" in strategy_data:
                 szStrategy = strategy_data["strategy"].get("type", "DEFAULT")
 
-        print "=== [EVENT] City Built: %s | Strategy Assigned: %s ===" % (cityName, szStrategy)
+        msg = "=== [EVENT] City Built: %s | Strategy Assigned: %s ===" % (cityName, szStrategy)
+        print msg
 
-        # Send event to API via HttpRequestManager
-        if self.http_mgr:
-            return self.http_mgr.post_event("onCityBuilt", argsList, extra_data=strategy_data)
-
-        return False
+        return strategy_data
