@@ -1,5 +1,6 @@
+import turn_db_facade
 # Instantiate facade (recreates 'session_turns.db' on disk)
-db_facade = TurnDatabaseFacade('session_turns.db')
+db_facade = turn_db_facade.TurnDatabaseFacade('session_turns.db')
 
 # Insert multiple event records under Turn 1
 db_facade.insert(1, {"event": "onCityBuilt", "city": "Rome", "strategy": "GROWTH"})

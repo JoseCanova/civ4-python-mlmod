@@ -7,11 +7,14 @@ import sys
 # Append custom Berkeley DB Python library path
 sys.path.append("E:\\berkleydb\\python")
 
-import bsddb
-
+try:
+    import bsddb
+except ImportError:
+    print "import error on berkleydb"
 try:
     import simplejson as json
 except ImportError:
+    print "import error on simplejson"
     try:
         import json
     except ImportError:
@@ -79,17 +82,17 @@ class TurnDatabaseFacade(object):
         self.insert(turn_number, data)
 
     def get_turn_records(self, turn_number):
-        """
-        Retrieves all data records stored under 'turn_%d' using a DBCursor.
-        Returns a list of parsed JSON objects or strings.
-        """
         key = self._format_key(turn_number)
         records = []
 
         cursor = self.db.cursor()
         try:
-            # Position cursor at first match for key
-            rec = cursor.get(key, bsddb.db.DB_SET)
+            # Catch DB_NOT_FOUND when the key doesn't exist yet
+            try:
+                rec = cursor.get(key, bsddb.db.DB_SET)
+            except bsddb.db.DBNotFoundError:
+                rec = None
+
             while rec:
                 val_str = rec[1]
                 if json is not None:
@@ -102,11 +105,15 @@ class TurnDatabaseFacade(object):
                     records.append(val_str)
 
                 # Move to next duplicate entry for this key
-                rec = cursor.next_dup()
+                try:
+                    rec = cursor.next_dup()
+                except bsddb.db.DBNotFoundError:
+                    rec = None
         finally:
             cursor.close()
 
         return records
+
 
     def sync(self):
         """Flushes database buffers to disk."""
