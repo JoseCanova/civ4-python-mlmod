@@ -2,6 +2,8 @@ import sqlite3
 import json
 import tech_tree_builder
 import networkx as nx
+import matplotlib
+matplotlib.use('TkAgg')  # Forces matplotlib to use the interactive Tkinter backend
 import matplotlib.pyplot as plt
 
 
@@ -11,7 +13,7 @@ def build_networkx_tech_graph(tree: tech_tree_builder.Civ4TechTreeBuilder) -> nx
     G = nx.DiGraph()
     
     for node in tree.nodes.values():
-        G.add_node(node.tech_id, name=node.tech_type, x=node.grid_x, y=node.grid_y, status=node.status)
+        G.add_node(node.name, name=node.tech_type, x=node.grid_x, y=node.grid_y, status=node.status)
     
     # Connect lower grid_x column nodes to higher grid_x column nodes in adjacent tracks
     for node in tree.nodes.values():
@@ -20,7 +22,7 @@ def build_networkx_tech_graph(tree: tech_tree_builder.Civ4TechTreeBuilder) -> nx
             if abs(other.grid_y - node.grid_y) <= 2
         ]
         for child in downstream:
-            G.add_edge(node.tech_id, child.tech_id, weight=child.cost)
+            G.add_edge(node.name, child.name, weight=child.cost)
             
     return G
 
@@ -29,10 +31,24 @@ def draw_digraph(digraph: nx.DiGraph):
     #pos = nx.spring_layout(digraph)
     pos = nx.nx_agraph.graphviz_layout(digraph, prog="dot")
     # Draw the graph showing arrows for edge direction
-    nx.draw(digraph, pos, with_labels=True, node_color='skyblue', edge_color='gray', arrows=True)
-    plt.savefig('network_graph.png', dpi=300, bbox_inches='tight')
+    padding_factor = 400 
+    node_sizes = [len(str(node)) * padding_factor for node in digraph.nodes()]
+    # 4. Draw the components
+    plt.figure(figsize=(6, 6))
+    nx.draw_networkx_nodes(digraph, pos, node_size=node_sizes, node_color='skyblue')
+
+    # Draw edges and labels
+    nx.draw_networkx_edges(digraph, pos, arrowstyle="->", arrowsize=15)
+    nx.draw_networkx_labels(digraph, pos, font_size=6, font_weight="bold")
+
+    plt.axis('off')
+
+
+
+    #nx.draw(digraph, pos, with_labels=True, node_color='skyblue', edge_color='gray', arrows=True)
+    #plt.savefig('network_graph.png', dpi=300, bbox_inches='tight')
     print("Graph saved successfully as network_graph.png!")
-    #plt.show()
+    plt.show()
     
 
 # 1. Fetch latest onTechTreeScan payload from SQLite
