@@ -1,6 +1,7 @@
 # city_do_turn_handler.py
-# Python 2.4 Compatible Delegate Handler for Civ IV City Do Turn Events
+# Python 2.4 & Python 3 Universal Compatible Delegate Handler for Civ IV City Do Turn Events
 
+import sys
 from CvPythonExtensions import CyGlobalContext, YieldTypes
 
 gc = CyGlobalContext()
@@ -17,6 +18,7 @@ class CityDoTurnDelegate(object):
     Delegate helper class that manages city citizen optimization and turn telemetry
     when a city processes its turn (onCityDoTurn event).
     Decoupled from networking; returns structured payload dicts for local database buffering.
+    Includes population, happiness, health, and growth metrics to track city growth bottlenecks.
     Strict Python 2.4 compatibility - NO ternary operators used under any circumstance.
     """
 
@@ -48,9 +50,10 @@ class CityDoTurnDelegate(object):
                 )
                 mgr.optimize()
                 return True
-            except Exception, e:
+            except Exception:
+                e = sys.exc_info()[1]
                 msg = "Warning: Failed optimizing citizens for %s: %s" % (pCity.getName(), str(e))
-                print msg
+                print(msg)
                 return False
 
         return False
@@ -58,7 +61,8 @@ class CityDoTurnDelegate(object):
     def calculate_city_turn_telemetry(self, pCity):
         """
         Calculates turn-level metrics including yield output, growth turns left,
-        current production queue item, and food/starvation buffer status.
+        current production queue item, food/starvation buffer, and happiness/health statistics.
+        Includes top-level city_name and city_id for direct payload identification.
         Uses strict Python 2.4 if/else blocks - NO ternary operators.
         """
         if not pCity or pCity.isNone():
@@ -66,6 +70,9 @@ class CityDoTurnDelegate(object):
 
         szName = pCity.getName()
         iPop = pCity.getPopulation()
+        iCityID = -1
+        if hasattr(pCity, 'getID'):
+            iCityID = pCity.getID()
 
         iFoodYield = 0
         iProdYield = 0
@@ -107,10 +114,58 @@ class CityDoTurnDelegate(object):
             except Exception:
                 iHammersNeeded = 0
 
+        # Happiness Metrics
+        iHappyLevel = 0
+        if hasattr(pCity, 'happyLevel'):
+            try:
+                iHappyLevel = pCity.happyLevel()
+            except Exception:
+                iHappyLevel = 0
+
+        iUnhappyLevel = 0
+        if hasattr(pCity, 'unhappyLevel'):
+            try:
+                iUnhappyLevel = pCity.unhappyLevel(0)
+            except Exception:
+                iUnhappyLevel = 0
+
+        iAngryPop = 0
+        if hasattr(pCity, 'angryPopulation'):
+            try:
+                iAngryPop = pCity.angryPopulation(0)
+            except Exception:
+                iAngryPop = 0
+
+        # Health Metrics
+        iGoodHealth = 0
+        if hasattr(pCity, 'goodHealth'):
+            try:
+                iGoodHealth = pCity.goodHealth()
+            except Exception:
+                iGoodHealth = 0
+
+        iBadHealth = 0
+        if hasattr(pCity, 'badHealth'):
+            try:
+                iBadHealth = pCity.badHealth(False)
+            except Exception:
+                iBadHealth = 0
+
+        # Growth Metrics
+        iFoodTurnsLeft = 0
+        if hasattr(pCity, 'getFoodTurnsLeft'):
+            try:
+                iFoodTurnsLeft = pCity.getFoodTurnsLeft()
+            except Exception:
+                iFoodTurnsLeft = 0
+
         telemetry_payload = {
             "event": "onCityDoTurn",
+            "city_name": szName,
+            "city_id": iCityID,
             "city_turn_status": {
                 "city_name": szName,
+                "city_id": iCityID,
                 "population": iPop,
                 "food_yield": iFoodYield,
                 "production_yield": iProdYield,
@@ -118,7 +173,13 @@ class CityDoTurnDelegate(object):
                 "current_project": szCurrentProject,
                 "hammers_invested": iHammersInvested,
                 "hammers_needed": iHammersNeeded,
-                "production_turns_left": iTurnsLeft
+                "production_turns_left": iTurnsLeft,
+                "happy_level": iHappyLevel,
+                "unhappy_level": iUnhappyLevel,
+                "angry_population": iAngryPop,
+                "good_health": iGoodHealth,
+                "bad_health": iBadHealth,
+                "food_turns_left": iFoodTurnsLeft
             }
         }
 
@@ -146,6 +207,6 @@ class CityDoTurnDelegate(object):
                 szProject = telemetry_data["city_turn_status"].get("current_project", "None")
 
         msg = "=== [EVENT] City Do Turn: %s | Current Project: %s ===" % (szName, szProject)
-        print msg
+        print(msg)
 
         return telemetry_data

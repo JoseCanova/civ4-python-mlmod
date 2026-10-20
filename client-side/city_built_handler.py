@@ -1,212 +1,109 @@
-# city_do_turn_handler.py
-# Python 2.4 & Python 3 Universal Compatible Delegate Handler for Civ IV City Do Turn Events
+# city_built_handler.py
+# Python 2.4 Compatible Delegate Handler for Civ IV City Built Events
 
-import sys
-from CvPythonExtensions import CyGlobalContext, YieldTypes
+from CvPythonExtensions import CyGlobalContext
 
 gc = CyGlobalContext()
 
-try:
-    import city
-    HAS_CITY_MODULES = True
-except ImportError:
-    HAS_CITY_MODULES = False
 
-
-class CityDoTurnDelegate(object):
+class CityBuiltDelegate(object):
     """
-    Delegate helper class that manages city citizen optimization and turn telemetry
-    when a city processes its turn (onCityDoTurn event).
+    Delegate helper class that manages the strategic behavior and telemetry payload
+    when a new city is founded (onCityBuilt event).
+    Separates event dispatching from gameplay logic and strategy determination.
     Decoupled from networking; returns structured payload dicts for local database buffering.
-    Includes population, happiness, health, and growth metrics to track city growth bottlenecks.
     Strict Python 2.4 compatibility - NO ternary operators used under any circumstance.
     """
 
-    def __init__(self, auto_manage_cities=True):
-        self.auto_manage_cities = auto_manage_cities
-        self.city_plot_priority = ("PRODUCTION", "COMMERCE", "FOOD")
-        self.city_specialist_priority = [
-            "SPECIALIST_SCIENTIST",
-            "SPECIALIST_ENGINEER",
-            "SPECIALIST_MERCHANT",
-            "SPECIALIST_CITIZEN"
-        ]
-        self.min_food_buffer = 0
+    def __init__(self):
+        pass
 
-    def optimize_city_citizens(self, pCity):
+    def determine_city_strategy(self, pCity, pPlayer):
         """
-        Invokes CityCitizenManager to optimize plot assignments and specialists.
-        """
-        if not pCity or pCity.isNone():
-            return False
-
-        if self.auto_manage_cities and HAS_CITY_MODULES:
-            try:
-                mgr = city.CityCitizenManager(
-                    pCity,
-                    priority_yields=self.city_plot_priority,
-                    specialist_priority=self.city_specialist_priority,
-                    min_food_buffer=self.min_food_buffer
-                )
-                mgr.optimize()
-                return True
-            except Exception:
-                e = sys.exc_info()[1]
-                msg = "Warning: Failed optimizing citizens for %s: %s" % (pCity.getName(), str(e))
-                print(msg)
-                return False
-
-        return False
-
-    def calculate_city_turn_telemetry(self, pCity):
-        """
-        Calculates turn-level metrics including yield output, growth turns left,
-        current production queue item, food/starvation buffer, and happiness/health statistics.
-        Includes top-level city_name and city_id for direct payload identification.
+        Determines the operational strategy for a newly built city.
+        Checks forge / specialist availability for specialist emphasis (e.g. ENGINEER_HUB).
         Uses strict Python 2.4 if/else blocks - NO ternary operators.
         """
         if not pCity or pCity.isNone():
             return None
 
-        szName = pCity.getName()
-        iPop = pCity.getPopulation()
-        iCityID = -1
-        if hasattr(pCity, 'getID'):
-            iCityID = pCity.getID()
+        cityName = pCity.getName()
 
-        iFoodYield = 0
-        iProdYield = 0
-        iCommYield = 0
+        # Check if Forge building exists to enable Engineer specialist allocation
+        iForgeType = gc.getInfoTypeForString("BUILDING_FORGE")
+        bHasForge = False
+        if iForgeType != -1 and hasattr(pCity, "isHasBuilding"):
+            bHasForge = pCity.isHasBuilding(iForgeType)
 
-        if hasattr(pCity, 'getYieldRate'):
-            try:
-                iFoodYield = pCity.getYieldRate(YieldTypes.YIELD_FOOD)
-                iProdYield = pCity.getYieldRate(YieldTypes.YIELD_PRODUCTION)
-                iCommYield = pCity.getYieldRate(YieldTypes.YIELD_COMMERCE)
-            except Exception:
-                pass
+        specialistPriority = []
+        if bHasForge:
+            specialistPriority = ["SPECIALIST_ENGINEER"]
 
-        szCurrentProject = "None"
-        if hasattr(pCity, 'getProductionName'):
-            try:
-                szCurrentProject = pCity.getProductionName()
-            except Exception:
-                szCurrentProject = "None"
+        iNumCities = 1
+        if pPlayer and hasattr(pPlayer, "getNumCities"):
+            iNumCities = pPlayer.getNumCities()
 
-        iTurnsLeft = 0
-        if hasattr(pCity, 'getProductionTurnsLeft'):
-            try:
-                iTurnsLeft = pCity.getProductionTurnsLeft()
-            except Exception:
-                iTurnsLeft = 0
+        # Strategy selection logic using explicit Python 2.4 if/else blocks
+        if iNumCities == 1:
+            szStrategy = "GROWTH"
+            yieldPriority = ["FOOD", "COMMERCE", "PRODUCTION"]
+            specialistPriority = []
+            firstBuild = "BUILDING_GRANARY"
+        elif hasattr(pCity, "isCoastal") and pCity.isCoastal(10):
+            szStrategy = "COMMERCE"
+            yieldPriority = ["COMMERCE", "FOOD", "PRODUCTION"]
+            specialistPriority = []
+            firstBuild = "BUILDING_LIGHTHOUSE"
+        elif bHasForge:
+            szStrategy = "ENGINEER_HUB"
+            yieldPriority = ["FOOD", "PRODUCTION", "COMMERCE"]
+            specialistPriority = ["SPECIALIST_ENGINEER"]
+            firstBuild = "BUILDING_FORGE"
+        else:
+            szStrategy = "PRODUCTION"
+            yieldPriority = ["PRODUCTION", "FOOD", "COMMERCE"]
+            specialistPriority = []
+            firstBuild = "BUILDING_BARRACKS"
 
-        iHammersInvested = 0
-        if hasattr(pCity, 'getProduction'):
-            try:
-                iHammersInvested = pCity.getProduction()
-            except Exception:
-                iHammersInvested = 0
-
-        iHammersNeeded = 0
-        if hasattr(pCity, 'getProductionNeeded'):
-            try:
-                iHammersNeeded = pCity.getProductionNeeded()
-            except Exception:
-                iHammersNeeded = 0
-
-        # Happiness Metrics
-        iHappyLevel = 0
-        if hasattr(pCity, 'happyLevel'):
-            try:
-                iHappyLevel = pCity.happyLevel()
-            except Exception:
-                iHappyLevel = 0
-
-        iUnhappyLevel = 0
-        if hasattr(pCity, 'unhappyLevel'):
-            try:
-                iUnhappyLevel = pCity.unhappyLevel(0)
-            except Exception:
-                iUnhappyLevel = 0
-
-        iAngryPop = 0
-        if hasattr(pCity, 'angryPopulation'):
-            try:
-                iAngryPop = pCity.angryPopulation(0)
-            except Exception:
-                iAngryPop = 0
-
-        # Health Metrics
-        iGoodHealth = 0
-        if hasattr(pCity, 'goodHealth'):
-            try:
-                iGoodHealth = pCity.goodHealth()
-            except Exception:
-                iGoodHealth = 0
-
-        iBadHealth = 0
-        if hasattr(pCity, 'badHealth'):
-            try:
-                iBadHealth = pCity.badHealth(False)
-            except Exception:
-                iBadHealth = 0
-
-        # Growth Metrics
-        iFoodTurnsLeft = 0
-        if hasattr(pCity, 'getFoodTurnsLeft'):
-            try:
-                iFoodTurnsLeft = pCity.getFoodTurnsLeft()
-            except Exception:
-                iFoodTurnsLeft = 0
-
-        telemetry_payload = {
-            "event": "onCityDoTurn",
-            "city_name": szName,
-            "city_id": iCityID,
-            "city_turn_status": {
-                "city_name": szName,
-                "city_id": iCityID,
-                "population": iPop,
-                "food_yield": iFoodYield,
-                "production_yield": iProdYield,
-                "commerce_yield": iCommYield,
-                "current_project": szCurrentProject,
-                "hammers_invested": iHammersInvested,
-                "hammers_needed": iHammersNeeded,
-                "production_turns_left": iTurnsLeft,
-                "happy_level": iHappyLevel,
-                "unhappy_level": iUnhappyLevel,
-                "angry_population": iAngryPop,
-                "good_health": iGoodHealth,
-                "bad_health": iBadHealth,
-                "food_turns_left": iFoodTurnsLeft
+        strategy_payload = {
+            "event": "onCityBuilt",
+            "city_name": cityName,
+            "strategy": {
+                "type": szStrategy,
+                "yield_priority": yieldPriority,
+                "specialist_priority": specialistPriority,
+                "recommended_first_build": firstBuild,
+                "min_food_buffer": 2,
+                "auto_manage_citizens": True
             }
         }
 
-        return telemetry_payload
+        return strategy_payload
 
-    def handle_city_do_turn(self, pCity, iPlayer=0, argsList=None):
+    def handle_city_built(self, pCity, argsList=None):
         """
-        Executes behavior when onCityDoTurn is delegated from CustomCiv4EventHandler.
-        Optimizes citizens and returns the turn telemetry payload.
+        Executes behavior when onCityBuilt is delegated from CustomCiv4EventHandler.
+        Calculates city strategy and returns the structured payload dictionary.
         """
         if not pCity or pCity.isNone():
             return None
 
-        szName = pCity.getName()
+        cityName = pCity.getName()
+        iOwner = pCity.getOwner()
 
-        # Step 1: Optimize citizen assignment
-        self.optimize_city_citizens(pCity)
+        pPlayer = None
+        if hasattr(gc, "getPlayer"):
+            pPlayer = gc.getPlayer(iOwner)
 
-        # Step 2: Build telemetry payload
-        telemetry_data = self.calculate_city_turn_telemetry(pCity)
+        # Determine strategy payload
+        strategy_data = self.determine_city_strategy(pCity, pPlayer)
 
-        szProject = "None"
-        if telemetry_data:
-            if "city_turn_status" in telemetry_data:
-                szProject = telemetry_data["city_turn_status"].get("current_project", "None")
+        szStrategy = "DEFAULT"
+        if strategy_data:
+            if "strategy" in strategy_data:
+                szStrategy = strategy_data["strategy"].get("type", "DEFAULT")
 
-        msg = "=== [EVENT] City Do Turn: %s | Current Project: %s ===" % (szName, szProject)
-        print(msg)
+        msg = "=== [EVENT] City Built: %s | Strategy Assigned: %s ===" % (cityName, szStrategy)
+        print msg
 
-        return telemetry_data
+        return strategy_data
