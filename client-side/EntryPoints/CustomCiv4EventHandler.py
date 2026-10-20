@@ -45,12 +45,8 @@ class CustomCiv4EventHandler(CvEventManager):
     Modular Event Handler Framework for Civilization IV (Python 2.4).
     Buffers all gameplay event payloads locally into Berkeley DB (turn_db_facade),
     submits a single consolidated turn batch to the HTTP server on onEndPlayerTurn,
-    and purges processed events from local DB upon successful submission to prevent memory growth in 32-bit mode.
-    Delegates event behaviors to specialized delegate classes:
-      - CityBuiltDelegate (onCityBuilt strategy evaluation)
-      - UnitBuiltDelegate (onUnitBuilt strategic role assignment)
-      - CityDoTurnDelegate (onCityDoTurn citizen optimization & turn metrics)
-      - CityBuildablesScanner & TechTreeScanner (turn state scanning)
+    purges processed events from local DB upon successful submission to prevent memory growth in 32-bit mode,
+    and closes Berkeley DB handles cleanly on onGameEnd / onOnExit / onExit to release lock files and prevent memory leaks.
     Strict Python 2.4 compatibility - NO ternary operators used in client-side code under any circumstance.
     """
 
@@ -83,13 +79,13 @@ class CustomCiv4EventHandler(CvEventManager):
             timeout=2.0
         )
 
-        # Initialize city buildables scanner (decoupled from direct HTTP posting)
+        # Initialize city buildables scanner
         self.buildables_scanner = city_buildables_scanner.CityBuildablesScanner()
 
-        # Initialize tech tree scanner (decoupled from direct HTTP posting)
+        # Initialize tech tree scanner
         self.tech_scanner = tech_tree_scanner.TechTreeScanner()
 
-        # Initialize helper delegate classes (decoupled from direct HTTP posting)
+        # Initialize helper delegate classes
         self.city_built_delegate = city_built_handler.CityBuiltDelegate()
 
         self.unit_built_delegate = unit_built_handler.UnitBuiltDelegate()
@@ -169,6 +165,19 @@ class CustomCiv4EventHandler(CvEventManager):
                 print(msg)
         return False
 
+    def close_database(self):
+        """
+        Safely closes the local Berkeley DB instance to release file locks,
+        flush dirty pages to disk, and prevent memory/resource leaks in 32-bit Civ IV mode.
+        """
+        if self.db_facade and hasattr(self.db_facade, 'close'):
+            try:
+                self.db_facade.close()
+                print("CustomCiv4EventHandler: Closed Berkeley DB connection cleanly.")
+            except Exception:
+                e = sys.exc_info()[1]
+                print("CustomCiv4EventHandler Warning: Error closing Berkeley DB: %s" % str(e))
+
     # ---------------------------------------------------------------------------
     # Event Overloads & Automated Handlers
     # ---------------------------------------------------------------------------
@@ -190,6 +199,41 @@ class CustomCiv4EventHandler(CvEventManager):
 
         self._dispatch_listeners('onGameStart', argsList)
 
+    def onGameEnd(self, argsList):
+        """
+        Fired when the game ends (Victory or Defeat screen).
+        Flushes and closes the Berkeley DB cleanly to prevent lock files or memory leaks.
+        """
+        if hasattr(CvEventManager, 'onGameEnd'):
+            CvEventManager.onGameEnd(self, argsList)
+
+        print("=== [EVENT] Game Ended ===")
+        self.close_database()
+        self._dispatch_listeners('onGameEnd', argsList)
+
+    def onOnExit(self, argsList):
+        """
+        Primary Civ IV event fired when exiting to main menu or quitting the game.
+        Guarantees database locks are released and resources are freed.
+        """
+        if hasattr(CvEventManager, 'onOnExit'):
+            CvEventManager.onOnExit(self, argsList)
+
+        print("=== [EVENT] Exiting Game Session (onOnExit) ===")
+        self.close_database()
+        self._dispatch_listeners('onOnExit', argsList)
+
+    def onExit(self, argsList):
+        """
+        Fallback hook for alternate Civ IV mod configurations using 'onExit'.
+        """
+        if hasattr(CvEventManager, 'onExit'):
+            CvEventManager.onExit(self, argsList)
+
+        print("=== [EVENT] Exiting Game Session (onExit) ===")
+        self.close_database()
+        self._dispatch_listeners('onExit', argsList)
+
     def onBeginPlayerTurn(self, argsList):
         iGameTurn, iPlayer = argsList
         CvEventManager.onBeginPlayerTurn(self, argsList)
@@ -200,12 +244,10 @@ class CustomCiv4EventHandler(CvEventManager):
                 msg = "=== [EVENT] Turn %d started for Human Player (%s) ===" % (iGameTurn, pPlayer.getCivilizationShortDescription(0))
                 print(msg)
                 try:
-                    # Run turn buildables scan
                     build_payload = self.buildables_scanner.scanActivePlayerCities(pPlayer, True)
                     if build_payload:
                         self._save_db(build_payload)
 
-                    # Also refresh tech tree options at game start or turn start
                     if iGameTurn == 1 or iGameTurn % 5 == 0:
                         tech_payload = self.tech_scanner.scanPlayerTechTree(pPlayer)
                         if tech_payload:
@@ -221,10 +263,6 @@ class CustomCiv4EventHandler(CvEventManager):
         self._dispatch_listeners('onBeginPlayerTurn', argsList)
 
     def onCityDoTurn(self, argsList):
-        """
-        Fired when a city completes turn processing.
-        Delegates citizen optimization and turn metric telemetry to CityDoTurnDelegate helper.
-        """
         pCity, iPlayer = argsList
         CvEventManager.onCityDoTurn(self, argsList)
 
@@ -236,10 +274,6 @@ class CustomCiv4EventHandler(CvEventManager):
         self._dispatch_listeners('onCityDoTurn', argsList)
 
     def onCityBuilt(self, argsList):
-        """
-        Fired when a new city is founded.
-        Delegates strategy evaluation and behavior management to CityBuiltDelegate helper class.
-        """
         pCity = argsList[0]
         CvEventManager.onCityBuilt(self, argsList)
 
@@ -253,10 +287,6 @@ class CustomCiv4EventHandler(CvEventManager):
         self._dispatch_listeners('onCityBuilt', argsList)
 
     def onUnitBuilt(self, argsList):
-        """
-        Fired when a unit completes training in a city.
-        Delegates role classification and telemetry reporting to UnitBuiltDelegate helper class.
-        """
         pCity, pUnit = argsList
         CvEventManager.onUnitBuilt(self, argsList)
 
@@ -268,10 +298,6 @@ class CustomCiv4EventHandler(CvEventManager):
         self._dispatch_listeners('onUnitBuilt', argsList)
 
     def onBuildingBuilt(self, argsList):
-        """
-        Fired when a building is constructed in a city.
-        Constructs telemetry payload and buffers into local Berkeley DB.
-        """
         pCity, iBuildingType = argsList
         CvEventManager.onBuildingBuilt(self, argsList)
 
@@ -299,10 +325,6 @@ class CustomCiv4EventHandler(CvEventManager):
         self._dispatch_listeners('onBuildingBuilt', argsList)
 
     def onTechAcquired(self, argsList):
-        """
-        Fired when a technology is acquired.
-        Constructs telemetry payload and buffers into local Berkeley DB.
-        """
         eTech, eTeam, ePlayer, bAnnounce = argsList
         CvEventManager.onTechAcquired(self, argsList)
 
@@ -323,7 +345,6 @@ class CustomCiv4EventHandler(CvEventManager):
         }
         self._save_db(tech_payload)
 
-        # Trigger updated tech tree scan if human player acquired tech
         if pPlayer and not pPlayer.isNone() and pPlayer.isHuman():
             try:
                 tech_scan_payload = self.tech_scanner.scanPlayerTechTree(pPlayer)
@@ -337,12 +358,6 @@ class CustomCiv4EventHandler(CvEventManager):
         self._dispatch_listeners('onTechAcquired', argsList)
 
     def onEndPlayerTurn(self, argsList):
-        """
-        Fired when a player completes their turn.
-        Retrieves all event payloads buffered in local Berkeley DB for this turn,
-        transmits a single consolidated batch payload to the HTTP server,
-        and deletes the processed events upon HTTP POST success to prevent memory bloat in 32-bit Civ IV mode.
-        """
         iGameTurn, iPlayer = argsList
         CvEventManager.onEndPlayerTurn(self, argsList)
 
